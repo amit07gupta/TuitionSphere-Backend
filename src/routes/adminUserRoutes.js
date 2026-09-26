@@ -1,0 +1,12 @@
+const express = require('express');
+const controller = require('../controllers/adminUserController');
+const authenticate = require('../middleware/authenticate');
+const authorize = require('../middleware/authorize');
+const router = express.Router();
+router.use(authenticate, authorize('SUPER_ADMIN'));
+router.get('/', controller.list);
+router.post('/', controller.create);
+router.get('/:id', controller.getById);
+router.put('/:id', controller.update);
+router.patch('/:id/status', controller.updateStatus);
+module.exports = router;

@@ -1,0 +1,13 @@
+const express = require('express');
+const controller = require('../controllers/tutorAssignmentController');
+const authenticate = require('../middleware/authenticate');
+const authorize = require('../middleware/authorize');
+const router = express.Router();
+router.use(authenticate, authorize('TUTOR'));
+router.route('/').get(controller.list).post(controller.create);
+router.get('/:id/submissions', controller.submissions);
+router.get('/:id/submissions/:submissionId/file', controller.submissionFile);
+router.route('/:id').get(controller.getById).put(controller.update);
+router.patch('/:id/archive', controller.updateArchive);
+router.patch('/:id/submissions/:submissionId/review', controller.review);
+module.exports = router;

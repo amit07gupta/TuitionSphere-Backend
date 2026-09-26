@@ -1,0 +1,12 @@
+ALTER TYPE "NoticeAudience" ADD VALUE IF NOT EXISTS 'TUTORS';
+ALTER TYPE "NoticeAudience" ADD VALUE IF NOT EXISTS 'TUTOR';
+ALTER TYPE "NoticeAudience" ADD VALUE IF NOT EXISTS 'EVERYONE';
+
+ALTER TABLE "notices" ADD COLUMN "tutorId" TEXT;
+
+CREATE INDEX "notices_tutorId_idx" ON "notices"("tutorId");
+
+ALTER TABLE "notices"
+ADD CONSTRAINT "notices_tutorId_fkey"
+FOREIGN KEY ("tutorId") REFERENCES "tutors"("id")
+ON DELETE RESTRICT ON UPDATE CASCADE;

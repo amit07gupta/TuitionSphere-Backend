@@ -1,0 +1,137 @@
+// Disposable API fixtures are always rolled back. No credentials are logged.
+require('dotenv').config({ quiet: true });
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const prisma = require('../src/config/prisma');
+let scoped = prisma;
+require.cache[require.resolve('../src/config/prisma')].exports = new Proxy({}, { get: (_, key) => key === '$transaction' ? (fn) => fn(scoped) : scoped[key] });
+const app = require('../src/app');
+const rollback = new Error('ROLLBACK_ADMIN_USER_SMOKE');
+let server;
+(async () => {
+  const before = await prisma.user.count();
+  server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/api/v1`;
+  async function request(path, method, token, body) {
+    const res = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: res.status, body: await res.json() };
+  }
+  try {
+    await prisma.$transaction(async (tx) => {
+      scoped = tx;
+      const suffix = crypto.randomUUID();
+      const actor = await tx.user.create({ data: { name: 'Disposable Super Admin', email: `actor-${suffix}@example.test`, passwordHash: 'unused-smoke-hash', role: 'SUPER_ADMIN', status: 'ACTIVE' } });
+      const actorToken = jwt.sign({ sub: actor.id, role: 'SUPER_ADMIN' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+      const password = crypto.randomBytes(16).toString('hex');
+      const form = { name: 'Disposable API Admin', email: `created-${suffix}@example.test`, phone: '', role: 'ADMIN', status: 'ACTIVE', password };
+      const created = await request('/admin-users', 'POST', actorToken, form);
+      assert.equal(created.status, 201); const id = created.body.data.id;
+      assert.equal(created.body.data.passwordHash, undefined); assert.equal(created.body.data.password, undefined);
+      const stored = await tx.user.findUnique({ where: { id } }); assert.ok(await bcrypt.compare(password, stored.passwordHash));
+      const login = await request('/auth/login', 'POST', null, { email: form.email, password });
+      assert.equal(login.status, 200); const adminToken = login.body.data.token;
+      const prefs = { admissions: false, fees: true, academics: false };
+      assert.equal((await request('/admin-profile/settings', 'PATCH', adminToken, { notificationPreferences: prefs })).status, 200);
+      assert.deepEqual((await request('/admin-profile', 'GET', adminToken)).body.data.notificationPreferences, prefs);
+      assert.equal((await request('/admin-profile/settings', 'PATCH', adminToken, { notificationPreferences: { ...prefs, fees: 'yes' } })).status, 400);
+      assert.equal((await request('/admin-profile/settings', 'PATCH', adminToken, { avatar: 'data:image/svg+xml;base64,abc' })).status, 400);
+      const otherLogin = await request('/auth/login', 'POST', null, { email: form.email, password });
+      const sessionRows = (await request('/admin-profile/sessions', 'GET', adminToken)).body.data;
+      assert.equal(sessionRows.trackedCurrentSession, true);
+      assert.equal(sessionRows.sessions.length, 2);
+      assert.equal(sessionRows.sessions.filter(row => row.current).length, 1);
+      const otherSession = sessionRows.sessions.find(row => !row.current);
+      assert.equal((await request('/admin-profile/sessions/' + otherSession.id, 'DELETE', actorToken)).status, 404);
+      assert.equal((await request('/admin-profile/sessions/' + otherSession.id, 'DELETE', adminToken)).status, 200);
+      assert.equal((await request('/auth/me', 'GET', otherLogin.body.data.token)).status, 401);
+      assert.equal((await request('/auth/me', 'GET', adminToken)).status, 200);
+      assert.equal((await request('/admin-profile', 'GET', null)).status, 401);
+      const ownProfile = await request('/admin-profile', 'GET', adminToken);
+      assert.equal(ownProfile.body.data.id, id);
+      assert.equal(ownProfile.body.data.passwordHash, undefined);
+      assert.equal(ownProfile.body.data.sessionVersion, undefined);
+      assert.equal((await request('/admin-profile', 'GET', actorToken)).body.data.id, actor.id);
+      assert.equal((await request('/admin-profile', 'PATCH', adminToken, { name: 'Updated Profile' })).status, 200);
+      assert.equal((await tx.user.findUnique({ where: { id } })).name, 'Updated Profile');
+      assert.equal((await tx.user.findUnique({ where: { id: actor.id } })).name, actor.name);
+      assert.equal((await request('/admin-profile', 'PATCH', adminToken, { role: 'SUPER_ADMIN' })).status, 400);
+      assert.equal((await request('/admin-profile', 'PATCH', adminToken, { id: actor.id, name: 'Changed' })).status, 400);
+      assert.equal((await request('/admin-profile', 'PATCH', adminToken, { phone: '123' })).status, 400);
+      assert.equal((await request('/admin-users', 'GET', adminToken)).status, 403);
+      assert.equal((await request('/admin-users', 'GET', null)).status, 401);
+      const rows = await request(`/admin-users?search=${encodeURIComponent(suffix)}&role=ADMIN`, 'GET', actorToken);
+      assert.equal(rows.status, 200); assert.equal(rows.body.data.length, 1); assert.equal(rows.body.data[0].id, id);
+      const { password: _password, ...changes } = form;
+      assert.ok(_password);
+      assert.equal((await request(`/admin-users/${id}`, 'PUT', actorToken, { ...changes, name: 'Updated Admin', role: 'SUPER_ADMIN' })).status, 200);
+      // Role changes are reflected even with the pre-promotion token.
+      assert.equal((await request('/admin-users', 'GET', adminToken)).status, 200);
+      assert.equal((await request(`/admin-users/${id}`, 'PUT', actorToken, { ...changes, name: 'Updated Admin' })).status, 200);
+      assert.equal((await request('/admin-users', 'GET', adminToken)).status, 403);
+      assert.equal((await request(`/admin-users/${id}/status`, 'PATCH', actorToken, { status: 'INACTIVE' })).status, 200);
+      assert.equal((await request('/auth/me', 'GET', adminToken)).status, 403);
+      assert.equal((await request('/auth/login', 'POST', null, { email: form.email, password })).status, 403);
+      assert.equal((await request(`/admin-users/${id}/status`, 'PATCH', actorToken, { status: 'ACTIVE' })).status, 200);
+      assert.equal((await request('/auth/me', 'GET', adminToken)).status, 200);
+      assert.equal((await request(`/admin-users/${actor.id}/status`, 'PATCH', actorToken, { status: 'INACTIVE' })).status, 409);
+      assert.equal((await request('/admin-users', 'POST', actorToken, { ...form, email: form.email.toUpperCase() })).status, 409);
+      assert.equal((await request(`/admin-users/${id}`, 'GET', actorToken)).status, 200);
+      assert.equal((await request('/admin-users/missing', 'GET', actorToken)).status, 404);
+      console.log('API checks passed: create, hashed password, login, filters, edit, role changes, status, self-protection, duplicates and authorization.');
+      const newPassword = crypto.randomBytes(16).toString('hex');
+      const passwordForm = { currentPassword: password, newPassword, confirmPassword: newPassword };
+      assert.equal((await request('/auth/change-password', 'POST', null, passwordForm)).status, 401);
+      assert.equal((await request('/auth/change-password', 'POST', adminToken, { ...passwordForm, currentPassword: 'incorrect' })).status, 400);
+      assert.equal((await request('/auth/change-password', 'POST', adminToken, passwordForm)).status, 200);
+      assert.equal((await request('/auth/me', 'GET', adminToken)).status, 401);
+      assert.equal((await request('/auth/login', 'POST', null, { email: form.email, password })).status, 401);
+      const freshLogin = await request('/auth/login', 'POST', null, { email: form.email, password: newPassword });
+      assert.equal(freshLogin.status, 200);
+      assert.equal((await request('/auth/me', 'GET', freshLogin.body.data.token)).status, 200);
+      assert.equal((await request('/auth/me', 'GET', actorToken)).status, 200);
+      console.log('Password API checks passed: validation, change, session revocation, fresh login and other account isolation.');
+      const dashboard = await request('/dashboard?month=2026-09', 'GET', actorToken);
+      assert.equal(dashboard.status, 200);
+      assert.equal(dashboard.body.data.collection.daily.length, 30);
+      assert.equal(dashboard.body.data.students, await tx.student.count());
+      assert.equal(dashboard.body.data.pendingInquiries, await tx.inquiry.count({ where: { status: { in: ['NEW', 'CONTACTED', 'FOLLOW_UP_REQUIRED'] } } }));
+      assert.equal((await request('/dashboard', 'GET', null)).status, 401);
+      assert.equal((await request('/dashboard?month=2026-13', 'GET', actorToken)).status, 400);
+      assert.equal((await request('/dashboard?academicSessionId=missing', 'GET', actorToken)).status, 404);
+      for (const session of dashboard.body.data.sessions.slice(0, 1)) {
+        const filtered = await request(`/dashboard?month=2026-09&academicSessionId=${session.id}`, 'GET', actorToken);
+        assert.equal(filtered.status, 200);
+        assert.equal(filtered.body.data.batches, await tx.batch.count({ where: { academicSessionId: session.id, status: 'ACTIVE' } }));
+      }
+      console.log('Dashboard API checks passed: counts, session filter, monthly buckets, validation and authentication.');
+      const learner = await tx.student.create({ data: { studentCode: `TEST-${suffix}`, parentName: 'Test Parent', parentPhone: '9999999999', user: { create: { name: 'Test Student', email: `student-${suffix}@example.test`, passwordHash: 'unused', role: 'STUDENT' } } } });
+      const studentPath = `/students/${learner.id}/overview`;
+      const emptyOverview = await request(studentPath, 'GET', actorToken);
+      assert.equal(emptyOverview.status, 200);
+      assert.deepEqual(emptyOverview.body.data.fees, { invoiced: 0, paid: 0, outstanding: 0 });
+      assert.equal(emptyOverview.body.data.attendance.percentage, null);
+      assert.equal((await request(studentPath, 'GET', null)).status, 401);
+      const learnerToken = jwt.sign({ sub: learner.userId }, process.env.JWT_SECRET);
+      assert.equal((await request('/admin-profile', 'GET', learnerToken)).status, 403);
+      assert.equal((await request('/admin-profile', 'PATCH', learnerToken, { name: 'Changed' })).status, 403);
+      assert.equal((await request(studentPath, 'GET', learnerToken)).status, 403);
+      assert.equal((await request('/students/missing/overview', 'GET', actorToken)).status, 404);
+      const existing = await tx.student.findFirst({ where: { id: { not: learner.id } } });
+      if (existing) {
+        const history = await request(`/students/${existing.id}/overview`, 'GET', actorToken);
+        assert.equal(history.status, 200);
+        assert.equal(history.body.data.attendanceHistory.length, await tx.attendance.count({ where: { studentId: existing.id } }));
+        const owned = await tx.invoice.findMany({ where: { admission: { studentId: existing.id } }, select: { id: true } });
+        assert.deepEqual(history.body.data.invoices.map((r) => r.id).sort(), owned.map((r) => r.id).sort());
+      }
+      console.log('Student overview API checks passed: empty records, ownership, missing student and role restrictions.');
+      throw rollback;
+    }, { timeout: 30000 });
+  } catch (e) { if (e !== rollback) throw e; }
+  scoped = prisma;
+  assert.equal(await prisma.user.count(), before);
+  console.log('All temporary accounts rolled back; user count unchanged.');
+})().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(async () => { if (server) await new Promise((resolve) => server.close(resolve)); await prisma.$disconnect(); });

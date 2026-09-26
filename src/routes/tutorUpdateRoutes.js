@@ -1,0 +1,10 @@
+const router = require('express').Router();
+const controller = require('../controllers/tutorUpdateController');
+const authenticate = require('../middleware/authenticate');
+const authorize = require('../middleware/authorize');
+router.use(authenticate, authorize('TUTOR'));
+router.get('/', controller.list);
+router.post('/', controller.create);
+router.put('/:id', controller.update);
+router.patch('/:id/archive', controller.archive);
+module.exports = router;
