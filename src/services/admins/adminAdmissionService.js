@@ -44,7 +44,10 @@ function validateInput(input = {}) {
   const feePlanId = String(input.feePlanId || "").trim();
   const joiningDate = parseDate(input.joiningDate);
 
-  if (studentName.length < 2 || parentName.length < 2) throw httpError("Enter valid student and parent names", 400);
+  const namePattern = /^[\p{L}]+(?:\s+[\p{L}]+)*$/u;
+  if (!namePattern.test(studentName) || !namePattern.test(parentName)) {
+    throw httpError("Student and parent names can only contain letters and spaces", 400);
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError("Enter a valid student login email", 400);
   if (!/^[6-9]\d{9}$/.test(phone)) throw httpError("Enter a valid 10-digit parent phone number", 400);
   if (![academicSessionId, gradeId, boardId, batchId, feePlanId].every(Boolean)) throw httpError("Select session, grade, board, batch and fee plan", 400);

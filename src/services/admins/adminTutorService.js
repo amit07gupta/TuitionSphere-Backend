@@ -45,10 +45,11 @@ function uniqueList(value) {
 }
 
 function validateInput(input = {}, isUpdate = false) {
+  const phone = String(input.phone || "").trim();
   const data = {
     name: String(input.name || "").trim(),
     email: String(input.email || "").trim().toLowerCase(),
-    phone: String(input.phone || "").replace(/\D/g, ""),
+    phone,
     employeeCode: String(input.employeeCode || "").trim().toUpperCase(),
     designation: String(input.designation || "").trim(),
     qualification: String(input.qualification || "").trim() || null,
@@ -64,9 +65,11 @@ function validateInput(input = {}, isUpdate = false) {
     password: input.password ? String(input.password) : isUpdate ? null : defaultPassword,
   };
 
-  if (data.name.length < 2) throw createHttpError("Enter a valid tutor name", 400);
+  if (!/^[\p{L}][\p{L} '-]+$/u.test(data.name)) {
+    throw createHttpError("Full name can only contain letters, spaces, apostrophes and hyphens", 400);
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) throw createHttpError("Enter a valid email address", 400);
-  if (data.phone.length !== 10) throw createHttpError("Phone number must contain exactly 10 digits", 400);
+  if (!/^\d{10}$/.test(data.phone)) throw createHttpError("Phone number must contain exactly 10 digits", 400);
   if (!data.employeeCode) throw createHttpError("Employee code is required", 400);
   if (!data.designation) throw createHttpError("Designation is required", 400);
   if (data.experience != null && (!Number.isInteger(data.experience) || data.experience < 0 || data.experience > 60)) {
